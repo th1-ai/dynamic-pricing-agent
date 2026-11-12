@@ -19,7 +19,7 @@ Inside the 0–6 day window, leaving a freed room at rack rate is leaving money 
 
 **How to apply:**
 
-1. As soon as the freeing event is detected (or executed by another agent), call this skill on the freed room and the affected dates only — don't re-run the full 30-day proposal.
+1. As soon as the freeing event is detected (or executed by another agent), run the dry-run for the affected dates only (`--start` / `--end`) and report only the freed room's lines — don't re-run the full 30-day proposal.
 2. Surface the proposal as part of the same operator interaction that caused the freeing event ("you just executed an upgrade — here's the re-price proposal for the now-free room").
 3. If the freed room's date no longer overlaps with any other booking, no re-price is needed — report "no rate change needed" and stop.
 
@@ -29,4 +29,4 @@ Running the full 30-day dry-run after every cancellation. Wasteful and noisy. Sc
 
 **Cross-agent integration:**
 
-The `room-upgrade-agent` calls this skill automatically as Step 7 of executing an accepted upgrade.
+The `room-upgrade-agent` runs the dynamic-pricing skill on the freed room after it executes an accepted upgrade. The approval rule still applies: the re-price is a proposal until the operator approves it.

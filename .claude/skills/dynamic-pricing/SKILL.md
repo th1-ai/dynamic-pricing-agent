@@ -1,99 +1,90 @@
 ---
 name: dynamic-pricing
+description: Dynamic pricing and MLOS rules for hotel rooms. Proposes last-minute rate drops to a per-room floor and MLOS = 1 for the next 30 days as a dry-run diff, then pushes to the PMS only after the operator approves. Use during the morning routine, after a room frees up inside the next 6 days, or when the operator asks about pricing, rates, MLOS, last-minute prices or says "run dynamic pricing".
 ---
 
 # Skill: Dynamic Pricing & MLOS
 
-## Trigger
+> **Template note:** replace `{{PRICING_TOOL}}`, `{{PMS_RATES_TOOL}}` and `{{PMS_AVAILABILITY_TOOL}}` before first use. See [README.md](../../../README.md#customising).
 
-Use proactively when:
-- Running the morning routine (always — this is one of the daily steps)
-- The operator asks about pricing, rates, MLOS, last-minute prices, "drop the price"
-- The operator says "run dynamic pricing", "check pricing", "pricing automation"
+## The rules
 
-> **Template note:** Replace `{{PMS_PROPERTY_ID}}`, `{{PRICING_TOOL}}` and `{{PMS_AVAILABILITY_TOOL}}` with the wrappers your setup uses. See [README.md](../../../README.md#customising) for guidance.
+1. **MLOS = 1** for every hotel room within 29 days of arrival, so a minimum stay does not block a short last-minute booking.
+2. **Drop the rate to the per-room floor** in the 0–6 day window when the room is still free and at least one other reservation covers that night. The hotel is open and staffed for that night anyway, so a floor-price booking is extra revenue.
+3. **Never raise a rate.** A room already at or below its floor is flagged for the operator and left alone.
+4. **Never touch whole-property or villa rentals.**
+5. **No push without approval.** The operator sees the dry-run diff first and approves it, in full or line by line.
 
-## Purpose
+## Who does what
 
-Apply the dynamic pricing rules:
+- **Main conversation:** delegate to the `dynamic-pricing` sub-agent with the goal "propose dynamic pricing changes, return the diff, do not push". Pass on any scope the operator gave ("only the next 7 days" becomes `--start` / `--end`; a freed room becomes that room's affected nights). Show the operator the diff exactly as returned and ask: **approve all**, **drop lines** (date + room), or **skip today**.
+- **On approval:** send the same sub-agent back to work (continue it, or delegate again) with "the operator approved the diff" and the dropped lines. On skip, do nothing and say "Skipped today, will re-evaluate tomorrow."
+- **Sub-agent:** if you are the `dynamic-pricing` sub-agent, this skill is your rulebook. Follow the Propose and Push steps in your own instructions; do not delegate further.
+- **No sub-agent available:** run the same flow inline: dry-run, diff, ask, and only then push, verify and refresh.
 
-1. **MLOS = 1** for every hotel room within 29 days of arrival.
-2. **Drop the rate to a per-room floor** for the 0–6 day window when ≥1 hotel reservation already overlaps that night (this fills partly-booked nights at last-minute rates).
-3. **Never raise rates** — if a room is already at or below floor for a date, flag it (informational) but do not push.
-4. **Never touch whole-property / villa rentals** — out of scope.
+An approval covers one diff. A new dry-run with different lines needs a new approval.
 
-**Approval is mandatory before any push.** This skill never pushes silently.
+## Tool contract
 
-## Workflow
+The operator supplies the tools. The flow assumes:
 
-The `dynamic-pricing` sub-agent owns the work. From this skill:
-
-1. **Spawn the sub-agent** with the goal "propose dynamic pricing changes for the next 30 days, present a diff, and wait for approval before pushing." Pass through any context the user provided (e.g. "only check the next 7 days" → set `--start` and `--end`).
-2. The sub-agent runs `{{PRICING_TOOL}} --format json`, reads this skill, and renders a diff table.
-3. The sub-agent asks: approve / edit / skip.
-4. On approve, the sub-agent re-runs with `--push` (and any `--exclude` pairs from edits), then refreshes the availability mirror.
-5. The sub-agent returns a one-line summary: "Pushed N changes (jobRef=X)" or "Skipped — no changes / operator chose to skip."
-
-## Direct invocation (if no sub-agent context available)
-
-If for some reason the sub-agent isn't being used, run the same flow inline:
-
-```bash
-{{PRICING_TOOL}} --format json
-```
-
-Render the diff, ask for approval, then on approval:
-
-```bash
-{{PRICING_TOOL}} --push
-{{PMS_AVAILABILITY_TOOL}} --start <today> --end <today+30>
-```
+| Command | Effect |
+|---|---|
+| `{{PRICING_TOOL}} --format json` | Dry-run. Prints JSON with `changes[]`, `patch_body` and `booked_dates_count`. Changes nothing. |
+| `... --start YYYY-MM-DD --end YYYY-MM-DD` | Limits the window (default: today + 30 days). |
+| `{{PRICING_TOOL}} --push` | Sends `patch_body` to the PMS and prints a confirmation reference. |
+| `... --exclude DATE:ROOMTYPEID` | Leaves one line out of the push. Repeatable. |
+| `{{PMS_RATES_TOOL}} --start ... --end ...` | Optional. Reads current rates and MLOS back from the PMS, to verify a push. |
+| `{{PMS_AVAILABILITY_TOOL}} --start ... --end ...` | Refreshes any downstream availability cache after a push. |
 
 ## Floor-price logic
 
-Each room type has two floor prices:
+Each room type has two floors. Tier A is the lower one, because the night is closer.
 
 | Tier | Window | Use when |
 |---|---|---|
-| **A** | 0–3 days out | Last-minute fill, room already partly booked on that night |
-| **B** | 4–6 days out | Same condition, slightly less urgent |
+| **A** | 0–3 days out | The room is free and another room is booked that night |
+| **B** | 4–6 days out | Same condition, less urgent |
 
-Pseudocode:
+The tool implements this; the pseudocode is here so you can explain a line to the operator, not so you can recompute it.
 
 ```
-for each (date, room) in next 30 days:
+for each (date, room) in the window:
     if room is whole-property:
         continue
-    if days_out > 6:
-        # Only set MLOS=1 within 29d, no rate drops outside 0–6d
-        if days_out <= 29 and current_mlos != 1:
-            propose mlos=1
+    if room is not available that night:
         continue
 
-    floor = TIER_A_FLOOR[room] if days_out <= 3 else TIER_B_FLOOR[room]
-    overlapping = count of confirmed reservations covering this night, excluding this room
-    if overlapping == 0:
-        continue   # not a fill scenario
+    if days_out <= 29 and current_mlos != 1:
+        propose mlos = 1
 
+    if days_out > 6:
+        continue                      # rate drops only in 0–6 days
+
+    other_bookings = confirmed reservations in other rooms covering this night
+    if other_bookings == 0:
+        continue                      # not a fill scenario
+
+    floor = TIER_A_FLOOR[room] if days_out <= 3 else TIER_B_FLOOR[room]
     if current_rate <= floor:
-        flag(date, room, "already at/below floor")
-        continue   # never raise
+        flag(date, room, "already at or below floor")
+        continue                      # never raise
 
     propose rate = floor
 ```
 
-## Output to morning briefing
+## Line for the morning briefing
 
-Either:
-- "Dynamic pricing — N changes proposed across {rooms}. Awaiting approval." (default — rates not pushed yet, included in the briefing)
-- "Dynamic pricing — no changes today."
-- "Dynamic pricing — pushed N changes (jobRef=X)." (only if approval already given during this session)
+Use exactly one:
 
-## Critical rules
+- "Dynamic pricing: N changes proposed across <rooms>. Awaiting approval." (the default; nothing is pushed yet)
+- "Dynamic pricing: no changes today."
+- "Dynamic pricing: pushed N changes (ref X)." (only if the operator approved in this session)
+- "Dynamic pricing: could not run (<reason>)." (tool error or failed sanity check; never report "no changes" for a failed run)
 
-- **Approval gate is non-negotiable.** Always dry-run first. Show diff. Ask. Then push.
-- Use `{{PRICING_TOOL}}`, not raw rate-plan API calls. Centralise the logic in one tool.
-- The tool already excludes whole-property rentals and respects the booking-overlap condition — don't re-implement the logic in the agent.
-- If `{{PRICING_TOOL}} --format json` returns `changes: []`, report "no changes" and stop. Don't push an empty body.
-- If the PMS push raises a 4xx, capture the response and stop — do NOT retry without diagnosing (likely a stale rate ID or auth issue).
-- Floor prices live in one place — either `.env` or a constants block at the top of `{{PRICING_TOOL}}`. Keep them in sync.
+## Stop and ask the operator when
+
+- the tool fails, returns invalid JSON, or shows zero booked nights on a 30-day run;
+- a proposed rate is above the current rate;
+- the PMS rejects the push (do not retry before the cause is known);
+- the operator's instruction conflicts with a rule above ("raise the weekend rate", "drop below floor for this guest"). These are outside this skill: say so, and let the operator change the rate or the floor in the PMS or the tool.
