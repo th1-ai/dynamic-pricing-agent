@@ -26,3 +26,8 @@ Thumbs.db
 dist/
 build/
 *.log
+
+# Agent run record (rates, proposals, tool errors). Keep the README only.
+runs/*
+!runs/README.md
+!runs/.gitkeep
